@@ -67,11 +67,11 @@ my @ignore_missing;
 my $include_installer = TRUE;
 my $from_germinate = FALSE;
 my $quiet = FALSE;
-my $verbose = 0;
+my $verbose = 5;
 my $source_list_filename;
 my $binary_list_filename;
 my $pool_dir;
-my $archive = 'http://archive.debian.org/debian/';
+my @archives;
 my %binaries;
 my %sources;
 my @archs;
@@ -110,9 +110,16 @@ if ($verbose > 0) {
    print "Base dir for package control files: $pkg_control_dir\n";
 }
 
-if ((defined $archive) && ($archive ne '')) {
-   if (substr ($archive, -1, 1) ne '/') {
-      $archive .= '/';
+if (!$quiet) {
+   print "Archives qty: ",scalar @archives,"\n";
+}
+
+if ((scalar @archives) > 0) {
+   my $archive;
+   foreach $archive (@archives) {
+      if (substr ($archive, -1, 1) ne '/') {
+         $archive .= '/';
+      }
    }
 } else {
    &print_error_exit("You specified an empty or invalid archive for downloads.\n",
@@ -120,16 +127,12 @@ if ((defined $archive) && ($archive ne '')) {
 }
 
 if ($verbose > 0) {
-   print "Mirror archive for downloads: $archive\n";
+   print "Mirror archive for downloads: @archives\n";
 }
-
 if (!$quiet) {
    print "Initializing package & source database...";
 }
-
-&parse_package_control_files($pkg_control_dir, \@distros, \@components, 
-        $include_installer);
-
+&parse_package_control_files($pkg_control_dir, \@distros, \@components, $include_installer, \@archives);
 if (!$quiet) {
    print "ok\n";
 }
@@ -137,15 +140,12 @@ if (!$quiet) {
 if (!$quiet) {
    print "Processing package lists...";
 }
-
 if (!$keep_wget_file) {
    $wget_list_handle = new File::Temp();
 } else {
    $wget_list_handle = new IO::File $wget_filename, "w";
 }   
-
 &process_package_lists($binary_list_filename, $source_list_filename);
-
 if (!$quiet) {
    print "ok\n";
 }
@@ -153,7 +153,6 @@ if (!$quiet) {
 if (!$quiet) {
    print "Initiating download...";
 }
-
 if (!$skip_download) {
    &do_download();
 } else {
@@ -162,6 +161,7 @@ if (!$skip_download) {
 
 sub do_download {
    my $cwd = getcwd();
+   my $archive;
     
    if ($pool_dir ne '') {
       if (!chdir($pool_dir)) {
@@ -185,10 +185,13 @@ sub do_download {
    } else {
       $wget_verbosity = '-q';
    }
+
    printf("Downloading %.0f Mb (less previous downloads)\n", $megs);
-   my @wgetcmd = ('/usr/bin/wget', '-i', "$wgetfile", "$wget_verbosity", '-nc', '-B', "$archive", '-r', '-nH', '--cut-dirs=1'); 
-   system @wgetcmd;
-   
+
+   foreach $archive (@archives) {
+      my @wgetcmd = ('/usr/bin/wget', '-i', "$wgetfile", "$wget_verbosity", '-nc', '-B', "$archive", '-r', '-nH', '--cut-dirs=1');
+      system @wgetcmd;
+   }
    if (!chdir($cwd)) {
       print_error_exit("Unable to return to original directory $cwd after downloading files\n",
          EXIT_CWD_CHDIR_FAILED);
@@ -252,9 +255,9 @@ sub process_package_list {
          if ($verbose > 3) {
             print "$package_name ";                     
             if (!$is_source) {
-               print ': binary\n';
+               print ": binary\n";
             } else {
-               print ': source\n';
+               print ": source\n";
             }
          }      
          &process_package($package_name, $is_source);
@@ -270,9 +273,12 @@ sub process_package {
    my $fields;
    my $highest_fields;
    my $highest_version;
-   
+
+   print "Package name: $package_name\n";
+   print "Is_source: $is_source\n"; 
+
    if (!$is_source) {
-      $ver_hash = $binaries{$package_name};
+      $ver_hash = $binaries{$package_name};     
    } else {
       $ver_hash = $sources{$package_name};
    }
@@ -286,22 +292,29 @@ sub process_package {
    # fetch a versioning system
    my $versys = $_system->versioning;
 
-while (($version, $fields) = each (%{$ver_hash})) {
+   print "Ver_hash: $ver_hash\n";
+
+   while (($version, $fields) = each (%{$ver_hash})) {     
       if (! defined($version)) {
          &print_error_exit("No version for '$package_name'",
             EXIT_NO_VERSION_FOR_PACKAGE);
+      } else {
+        print "version: $version, package_name: $package_name\n";
       }     
       if (! defined($highest_version)) {
          $highest_version = $version;
          $highest_fields = $fields;
+         print "version: $version, highest_version: $highest_version, highest_fields: $highest_fields\n";
       } elsif ($versys->compare($highest_version, $version) > 0 ) {
          if ($verbose > 2) {
-            print "ver: $version, high_ver: $highest_version\n";
+            print "version: $version, highest_version: $highest_version\n";
          }
          $highest_version = $version;
          $highest_fields = $fields;
+         print "version: $version, highest_version: $highest_version, highest_fields: $highest_fields\n";
       }
    }
+
    if (! defined ($highest_fields)) {      
       &print_error_exit("No highest field for '$package_name'",
          EXIT_NO_HIGH_FIELDS);
@@ -312,7 +325,7 @@ while (($version, $fields) = each (%{$ver_hash})) {
          my $directory;
          if (!$is_source) {
             if ($verbose > 2) {
-               print $archive . ${$highest_fields}{'Filename'} . "\n";   
+               print $archives[0] . ${$highest_fields}{'Filename'} . "\n";
             }
             $download_size += ${$highest_fields}{'Size'};
             $filepath = ${$highest_fields}{'Filename'};            
@@ -473,7 +486,12 @@ sub parse_command_line {
          $option_value = &trim($option_value);
          if ($option eq 'a') {
             # Archive mirror to download from
-            $archive = $option_value;
+            my @archives_split = split /,/, $option_value;
+            foreach my $archive (@archives_split) {
+               if ((defined $archive) && ($archive ne '')) {
+                  push @archives, $archive;
+               }
+            }
             $print_help = FALSE;
          } elsif ($option eq 'l') {
             # Directory which contains the package control files
@@ -591,12 +609,13 @@ sub parse_command_line {
          }
       }
    }
-   
+  
+   print "Verbosity: $verbose\n";
    if ($verbose > 1) {
       print "-----------------------\n";
       print "Commandline parameters:\n";
       print "-----------------------\n";
-      print "archive mirror: $archive\n";
+      print "archive mirror: @archives\n";
       print "directory with pool subdir: $pool_dir\n";  
       print "package control base dir: $pkg_control_dir\n";
       print "distributions: @distros\n";
@@ -665,54 +684,65 @@ sub parse_package_control_files {
    my $distros_ref = shift;
    my $components_ref = shift;
    my $include_installer = shift;
+   my $archives_ref = shift;
    
    my $distro;
    my $component;
    my $value;
    my $filename;
-   
+   my $components_string;
+   my $archive;
+   my $filename_archive_prefix;
+
    # Package control files are of the form distribution_component_controltype
    # where controltype is Packages, InstallerPackages, or Sources
    
    # So we iterate through the distros and components looking for readable files to parse
    # (in the base directory specified on the command line, or (if non specified) the current
    # directory).
-   foreach $distro (@{$distros_ref}) {
-      foreach $component (qw/main contrib/) {
-         $filename = $base_dir . $distro . '_' . $component . '_Packages';
-         if (-r $filename) {
-            if ($verbose > 0) {
-               print "Parsing $filename\n";
-            }
-            # FALSE, FALSE means, Not installer, not source
-            &parse_package_control_file($filename, $distro, $component, FALSE, FALSE);
-         } elsif ($verbose > 0) {
-            print "Couldn't read $filename\n";
-         }
-         if ($include_installer) {
-            $filename = $base_dir . $distro . '_' . $component . '_InstallerPackages';
+   @components = @{$components_ref};
+   foreach $archive (@{$archives_ref}) {
+      $filename_archive_prefix = $archive;
+      $filename_archive_prefix =~ s/:/%3A/g;
+      $filename_archive_prefix =~ s/\//%2F/g;
+
+      foreach $distro (@{$distros_ref}) {
+         foreach $component (@components) {
+            $filename = $filename_archive_prefix.'_'.$base_dir.$distro.'_'.$component.'_Packages';
             if (-r $filename) {
                if ($verbose > 0) {
                   print "Parsing $filename\n";
                }
-               # TRUE, FALSE means, installer, not source
-               &parse_package_control_file($filename, $distro, $component, TRUE, FALSE);
+               # FALSE, FALSE means, Not installer, not source
+               &parse_package_control_file($filename, $distro, $component, FALSE, FALSE, $archive);
+            } elsif ($verbose > 0) {
+               print "Couldn't read $filename\n";
+            }
+            if ($include_installer) {
+               $filename = $filename_archive_prefix.'_'.$base_dir.$distro.'_'.$component.'_InstallerPackages';
+               if (-r $filename) {
+                  if ($verbose > 0) {
+                     print "Parsing $filename\n";
+                  }
+                  # TRUE, FALSE means, installer, not source
+                  &parse_package_control_file($filename, $distro, $component, TRUE, FALSE, $archive);
+               } elsif ($verbose > 0) {
+                  print "Couldn't read $filename\n";
+               }
+            }
+            $filename = $filename_archive_prefix.'_'.$base_dir.$distro.'_'.$component.'_Sources';
+            if (-r $filename) {
+               if ($verbose > 0) {
+                  print "Parsing $filename\n";
+               }
+               # FALSE, TRUE means, not installer, is source
+               # source control files don't list installer udebs generated
+               &parse_package_control_file($filename, $distro, $component, FALSE, TRUE, $archive);
             } elsif ($verbose > 0) {
                print "Couldn't read $filename\n";
             }
          }
-         $filename = $base_dir . $distro . '_' . $component . '_Sources';
-         if (-r $filename) {
-            if ($verbose > 0) {
-               print "Parsing $filename\n";
-            }
-            # FALSE, TRUE means, not installer, is source
-            # source control files don't list installer udebs generated
-            &parse_package_control_file($filename, $distro, $component, FALSE, TRUE);
-         } elsif ($verbose > 0) {
-            print "Couldn't read $filename\n";
-         }
-      }               
+      }
    }
 }
 
@@ -722,7 +752,8 @@ sub parse_package_control_package {
    my $component = shift;
    my $is_installer = shift;
    my $is_source = shift;
-   my $line_number = shift;   
+   my $line_number = shift;
+   my $archive = shift;
    my @required_fields;
    my %pkg_hash;
    my %ver_hash;
@@ -747,7 +778,7 @@ sub parse_package_control_package {
             EXIT_MISSING_FIELD);
       }
    }
-   
+
    if (!$is_source) {
       if ((! defined ${$package_hash_ref}{'Source'}) || (${$package_hash_ref}{'Source'} eq '')) {
          ${$package_hash_ref}{'Source'} = ${$package_hash_ref}{'Package'};
@@ -762,7 +793,18 @@ sub parse_package_control_package {
       # only field value
       my $field_value = ${$package_hash_ref}{'Source'};
       my $source_version;
-      
+
+      if ($field_value eq "gir1.2-vte-2.90") {
+         print "gir1.2-vte-2.90\n";
+      } elsif ($field_value eq "gettext-base") {
+         print "gettext-base\n";
+      } elsif ($field_value eq "gksu") {
+         print "gksu\n";
+      } elsif ($field_value eq "grub-customizer") {
+         print "grub-customizer\n";
+      }
+
+
       if ($field_value =~ m/^(.+)\s*\((.+)\)/) {
          $field_value = &trim($1);
          $source_version = &trim($2);
@@ -771,9 +813,10 @@ sub parse_package_control_package {
          }
       } else {
          $source_version = $version;
-      }      
+      }
 
       # Create hash with contents of fields we want
+      $field_hash{'Archive'} = $archive;
       $field_hash{'Source'} = $field_value;
       $field_hash{'SourceVersion'} = $source_version;
       $field_hash{'Distro'} = $dist;
@@ -784,6 +827,9 @@ sub parse_package_control_package {
       $field_hash{'Size'} = ${$package_hash_ref}{'Size'};
       
       # Get current hash with all versions of the current package
+      if ($field_value eq 'gksu' || $field_value eq 'account-plugins') {
+         print "$field_value\n";
+      }
       $ver_hash_ref = $binaries{${$package_hash_ref}{'Package'}};
    
       if (defined $ver_hash_ref) {
@@ -860,6 +906,7 @@ sub parse_package_control_file {
    my $component = shift;
    my $is_installer = shift;
    my $is_source = shift;
+   my $archive = shift;
    my $packages_control_handle = new IO::File $package_control_filename, "r";
 
 
@@ -910,8 +957,7 @@ sub parse_package_control_file {
       # Packages are always separated by a blank line, so when we encounter a blank line we
       # process the package information gathered since the last blank line.
       if ((! defined $line) || ($line eq '')) {
-         &parse_package_control_package(\%package_hash, $dist, $component,
-            $is_installer, $is_source, $line_number);
+         &parse_package_control_package(\%package_hash, $dist, $component, $is_installer, $is_source, $line_number, $archive);
          $field_name = '';
          $field_value = '';
          $new_package = TRUE;
